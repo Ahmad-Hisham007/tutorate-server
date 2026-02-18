@@ -45,7 +45,7 @@ const verifyToken = async (req, res, next) => {
 };
 
 // MongoDB connection
-const uri = process.env.MONGO_URI;
+const uri = process.env.MONGO_URI_TEST;
 
 // Create MongoDB client
 const client = new MongoClient(uri, {
