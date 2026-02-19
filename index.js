@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express, { json } from "express";
 import cors from "cors";
-import { MongoClient, ServerApiVersion } from "mongodb";
+import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
 import admin from "firebase-admin";
 
 // Initialize Firebase Admin
@@ -45,7 +45,7 @@ const verifyToken = async (req, res, next) => {
 };
 
 // MongoDB connection
-const uri = process.env.MONGO_URI_TEST;
+const uri = process.env.MONGO_URI;
 
 // Create MongoDB client
 const client = new MongoClient(uri, {
@@ -134,7 +134,6 @@ app.get("/api/tutors", async (req, res) => {
 // GET single tutor by ID
 app.get("/api/tutors/:id", async (req, res) => {
   try {
-    const { ObjectId } = await import("mongodb");
     const tutor = await usersCollection.findOne(
       {
         _id: new ObjectId(req.params.id),
