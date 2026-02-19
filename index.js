@@ -208,6 +208,26 @@ app.get("/api/tutors/featured", async (req, res) => {
   }
 });
 
+// Tutors API
+// GET all tutors (public route)
+app.get("/api/tuitions", async (req, res) => {
+  try {
+    const tuitions = await tuitionsCollection.find().toArray();
+
+    res.send({
+      success: true,
+      count: tuitions.length,
+      data: tuitions,
+    });
+  } catch (error) {
+    console.error("Error fetching tuitions:", error);
+    res.status(500).send({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 //insert sample data
 
 // Insert function
