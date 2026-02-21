@@ -209,22 +209,82 @@ app.get("/api/tutors/featured", async (req, res) => {
 });
 
 // Tuitions API
-// GET all tuitions (public route)
+// GET all tuitions with search, filters and sorting
 app.get("/api/tuitions", async (req, res) => {
   try {
-    const tuitions = await tuitionsCollection.find().toArray();
+    const {
+      search,
+      location,
+      subject,
+      class: className,
+      sortBy = "newest",
+      page = 1,
+      limit = 4,
+    } = req.query;
+
+    // Build filter
+    const filter = { status: "active" };
+
+    // Search
+    if (search) {
+      filter.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { institution: { $regex: search, $options: "i" } },
+        { subject: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // Location
+    if (location) {
+      filter.$or = filter.$or || [];
+      filter.$or.push(
+        { location: { $regex: location, $options: "i" } },
+        { area: { $regex: location, $options: "i" } },
+      );
+    }
+
+    // Subject
+    if (subject) {
+      filter.subject = { $regex: subject, $options: "i" };
+    }
+
+    // Class
+    if (className) {
+      filter.class = { $regex: className, $options: "i" };
+    }
+
+    // Sorting
+    let sort = {};
+    if (sortBy === "budget-low") sort = { minBudget: 1 };
+    else if (sortBy === "budget-high") sort = { minBudget: -1 };
+    else if (sortBy === "newest") sort = { posted: -1 };
+    else if (sortBy === "oldest") sort = { posted: 1 };
+    else if (sortBy === "top-rated") sort = { applicants: -1 };
+    else sort = { posted: -1 };
+
+    // Pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Get data
+    const tuitions = await tuitionsCollection
+      .find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(parseInt(limit))
+      .toArray();
+
+    const totalCount = await tuitionsCollection.countDocuments(filter);
 
     res.send({
       success: true,
-      count: tuitions.length,
       data: tuitions,
+      total: totalCount,
+      page: parseInt(page),
+      totalPages: Math.ceil(totalCount / parseInt(limit)),
     });
   } catch (error) {
-    console.error("Error fetching tuitions:", error);
-    res.status(500).send({
-      success: false,
-      error: error.message,
-    });
+    res.status(500).send({ success: false, error: error.message });
   }
 });
 
@@ -252,7 +312,6 @@ app.get("/api/tuitions/:id", async (req, res) => {
         error: "Tuition post not found",
       });
     }
-    console.log(tuition);
     res.send({
       success: true,
       data: tuition,
@@ -841,6 +900,8 @@ app.listen(port, async () => {
     // await insertTutors();
 
     // await updateTuitions();
+
+    await updateBudgets();
 
     console.log("✅ Server setup complete!");
   } catch (error) {
