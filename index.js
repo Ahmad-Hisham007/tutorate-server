@@ -25,29 +25,110 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(json());
 
-// Middleware to verify token
+// ============= TOKEN VERIFICATION MIDDLEWARE =============
+
+// Verify Firebase token middleware
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).send({ error: "No token provided" });
+    return res.status(401).json({
+      success: false,
+      error: "No token provided",
+      code: "NO_TOKEN",
+    });
   }
 
   const token = authHeader.split(" ")[1];
 
   try {
+    // Verify the Firebase token
     const decodedToken = await admin.auth().verifyIdToken(token);
-    req.user = decodedToken;
+
+    // Get user from MongoDB using email from token
+    const user = await usersCollection.findOne({ email: decodedToken.email });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: "User not found in database",
+        code: "USER_NOT_FOUND",
+      });
+    }
+
+    if (user.status === "blocked") {
+      return res.status(403).json({
+        success: false,
+        error: "Your account has been blocked",
+        code: "ACCOUNT_BLOCKED",
+      });
+    }
+
+    // Attach user data to request
+    req.user = {
+      uid: decodedToken.uid,
+      email: decodedToken.email,
+      name: user.name,
+      role: user.role,
+      status: user.status,
+      userId: user._id.toString(),
+      photoURL: user.photoURL,
+    };
+
     next();
   } catch (error) {
-    return res.status(401).send({ error: "Invalid or expired token" });
+    console.error("Token verification error:", error);
+
+    if (error.code === "auth/id-token-expired") {
+      return res.status(401).json({
+        success: false,
+        error: "Token expired",
+        code: "TOKEN_EXPIRED",
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      error: "Invalid token",
+      code: "INVALID_TOKEN",
+    });
   }
 };
 
+// Role verification middleware
+const verifyRole = (allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: "Authentication required",
+        code: "AUTH_REQUIRED",
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      console.warn(
+        `Security: User ${req.user.email} with role ${req.user.role} attempted to access ${req.originalUrl}`,
+      );
+
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: Insufficient permissions",
+        code: "INSUFFICIENT_PERMISSIONS",
+        requiredRole: allowedRoles,
+      });
+    }
+
+    next();
+  };
+};
+
 // MongoDB connection
+
 const uri = process.env.MONGO_URI_TEST;
 
 // Create MongoDB client
+
 const client = new MongoClient(uri, {
   family: 4,
   serverApi: {
@@ -101,7 +182,8 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-// Tutors API
+// ============= Frontend APIs =============
+
 // GET all tutors (public route)
 app.get("/api/tutors", async (req, res) => {
   try {
@@ -321,6 +403,149 @@ app.get("/api/tuitions/:id", async (req, res) => {
     res.status(500).send({
       success: false,
       error: error.message,
+    });
+  }
+});
+
+// ============= Backend APIs =============
+// Register new user
+app.post("/api/users", async (req, res) => {
+  try {
+    const { name, email, phone, photoURL, role, uid } = req.body;
+
+    // Validate required fields
+    if (!name || !email || !phone || !role || !uid) {
+      return res.status(400).send({
+        success: false,
+        error: "All fields are required",
+      });
+    }
+
+    // Validate role
+    if (!["student", "tutor"].includes(role)) {
+      return res.status(400).send({
+        success: false,
+        error: "Invalid role selected",
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await usersCollection.findOne({ email });
+    if (existingUser) {
+      return res.status(400).send({
+        success: false,
+        error: "User with this email already exists",
+      });
+    }
+
+    // Prepare user document for MongoDB
+    const newUser = {
+      uid, // Firebase UID
+      name,
+      email,
+      phone,
+      photoURL:
+        photoURL ||
+        `https://ui-avatars.com/api/?name=${name}&background=random`,
+      role,
+      status: role === "tutor" ? "pending" : "active", // Tutors need admin approval
+      isVerified: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+
+      // Tutor specific fields (optional for tutors)
+      ...(role === "tutor" && {
+        qualifications: req.body.qualifications || [],
+        subjects: req.body.subjects || [],
+        experience: req.body.experience || 0,
+        bio: req.body.bio || "",
+        hourlyRate: req.body.hourlyRate || 0,
+        location: req.body.location || "",
+        availability: req.body.availability || {},
+        whatsapp: req.body.whatsapp || "",
+        rating: 0,
+        totalReviews: 0,
+      }),
+
+      // Student specific fields
+      ...(role === "student" && {
+        preferredSubjects: req.body.preferredSubjects || [],
+        class: req.body.class || "",
+      }),
+    };
+
+    // Save to MongoDB and return the result directly
+    const result = await usersCollection.insertOne(newUser);
+
+    console.log(`✅ New user registered: ${email} as ${role}`);
+
+    // Send the MongoDB result directly
+    res.status(201).send(result);
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Registration failed. Please try again.",
+    });
+  }
+});
+
+// Google Login - Create or Update user
+app.post("/api/users/google", async (req, res) => {
+  try {
+    const { email, name, photoURL, uid } = req.body;
+
+    // Check if user exists
+    let user = await usersCollection.findOne({ email });
+
+    if (!user) {
+      // Create new user with student role by default
+      const newUser = {
+        uid,
+        name,
+        email,
+        phone: "",
+        photoURL:
+          photoURL ||
+          `https://ui-avatars.com/api/?name=${name}&background=random`,
+        role: "student",
+        status: "active",
+        isVerified: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        preferredSubjects: [],
+        class: "",
+      };
+
+      // Insert and return the result
+      const result = await usersCollection.insertOne(newUser);
+      console.log(`✅ New user registered: ${email}`);
+
+      // Send the MongoDB result directly
+      res.status(201).send(result);
+    } else {
+      // Update existing user's info
+      const result = await usersCollection.updateOne(
+        { email },
+        {
+          $set: {
+            name,
+            photoURL,
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      console.log(`✅ Google user updated: ${email}`);
+
+      // Send the MongoDB update result directly
+      res.send(result);
+    }
+  } catch (error) {
+    console.error("Google login error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Google login failed",
     });
   }
 });
