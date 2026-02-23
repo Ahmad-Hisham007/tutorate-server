@@ -89,33 +89,30 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// Role verification middleware
+// middlewares/verifyRole.js
 const verifyRole = (allowedRoles) => {
   return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({
+    // Check if user exists (verifyToken already ran)
+    if (!req.decoded_user) {
+      return res.status(401).send({
         success: false,
         error: "Authentication required",
-        code: "AUTH_REQUIRED",
       });
     }
 
-    if (!allowedRoles.includes(req.user.role)) {
-      console.warn(
-        `Security: User ${req.user.email} with role ${req.user.role} attempted to access ${req.originalUrl}`,
-      );
-
-      return res.status(403).json({
+    // Check if user's role is in allowed roles
+    if (!allowedRoles.includes(req.decoded_user.role)) {
+      return res.status(403).send({
         success: false,
-        error: "Forbidden: Insufficient permissions",
-        code: "INSUFFICIENT_PERMISSIONS",
-        requiredRole: allowedRoles,
+        error: "Access denied. Insufficient permissions.",
       });
     }
 
     next();
   };
 };
+
+export default verifyRole;
 
 // MongoDB connection
 
@@ -522,9 +519,17 @@ app.post("/api/users/google", async (req, res) => {
 // GET current user profile (protected)
 app.get("/api/users/profile", verifyToken, async (req, res) => {
   const email = req.query.email;
-  console.log("Email from query:", email); // user@example.com
-  console.log("All query params:", req.query);
+  const decoded_email = req.decoded_user?.email;
+
   try {
+    // Verify email matches
+    if (email !== decoded_email) {
+      return res.status(401).send({
+        success: false,
+        error: "Forbidden access",
+        code: "UNAUTHORIZED_ACCESS",
+      });
+    }
     const user = await usersCollection.findOne(
       { email: email },
       {
