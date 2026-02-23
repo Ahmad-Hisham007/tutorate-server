@@ -119,7 +119,7 @@ const verifyRole = (allowedRoles) => {
 
 // MongoDB connection
 
-const uri = process.env.MONGO_URI;
+const uri = process.env.MONGO_URI_TEST;
 
 // Create MongoDB client
 
@@ -487,54 +487,27 @@ app.post("/api/users", async (req, res) => {
 // Google Login - Create or Update user
 app.post("/api/users/google", async (req, res) => {
   try {
-    const { email, name, photoURL, uid } = req.body;
+    const { email } = req.body;
 
-    // Check if user exists
-    let user = await usersCollection.findOne({ email });
+    // Check if user exists in database
+    const existingUser = await usersCollection.findOne({ email });
 
-    if (!user) {
-      // Create new user with student role by default
-      const newUser = {
-        uid,
-        name,
-        email,
-        phone: "",
-        photoURL:
-          photoURL ||
-          `https://ui-avatars.com/api/?name=${name}&background=random`,
-        role: "student",
-        status: "active",
-        isVerified: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        preferredSubjects: [],
-        class: "",
-      };
-
-      // Insert and return the result
-      const result = await usersCollection.insertOne(newUser);
-      console.log(`✅ New user registered: ${email}`);
-
-      // Send the MongoDB result directly
-      res.status(201).send(result);
-    } else {
-      // Update existing user's info
-      const result = await usersCollection.updateOne(
-        { email },
-        {
-          $set: {
-            name,
-            photoURL,
-            updatedAt: new Date(),
-          },
-        },
-      );
-
-      console.log(`✅ Google user updated: ${email}`);
-
-      // Send the MongoDB update result directly
-      res.send(result);
+    if (!existingUser) {
+      return res.status(404).send({
+        success: false,
+        error: "No account found with this email. Please register first.",
+        code: "USER_NOT_FOUND",
+      });
     }
+
+    // User exists - just return success with user data
+    console.log(`✅ Google login successful for existing user: ${email}`);
+
+    res.send({
+      success: true,
+      message: "Login successful",
+      data: existingUser,
+    });
   } catch (error) {
     console.error("Google login error:", error);
     res.status(500).json({
@@ -705,7 +678,7 @@ app.get("/api/users/stats", verifyToken, async (req, res) => {
 
       // Get ongoing tuitions count
       stats.ongoingTuitions = await tuitionsCollection.countDocuments({
-        tutorId: req.user.userId,
+        tutorId: req.decoded_user.uid,
         status: "ongoing",
       });
     } else if (req.decoded_user.role === "student") {
