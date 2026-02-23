@@ -30,9 +30,8 @@ app.use(json());
 // Verify Firebase token middleware
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({
+  if (!authHeader) {
+    return res.status(401).send({
       success: false,
       error: "No token provided",
       code: "NO_TOKEN",
@@ -44,12 +43,11 @@ const verifyToken = async (req, res, next) => {
   try {
     // Verify the Firebase token
     const decodedToken = await admin.auth().verifyIdToken(token);
-
     // Get user from MongoDB using email from token
     const user = await usersCollection.findOne({ email: decodedToken.email });
 
     if (!user) {
-      return res.status(401).json({
+      return res.status(401).send({
         success: false,
         error: "User not found in database",
         code: "USER_NOT_FOUND",
@@ -57,7 +55,7 @@ const verifyToken = async (req, res, next) => {
     }
 
     if (user.status === "blocked") {
-      return res.status(403).json({
+      return res.status(403).send({
         success: false,
         error: "Your account has been blocked",
         code: "ACCOUNT_BLOCKED",
@@ -65,14 +63,10 @@ const verifyToken = async (req, res, next) => {
     }
 
     // Attach user data to request
-    req.user = {
+    req.decoded_user = {
       uid: decodedToken.uid,
       email: decodedToken.email,
-      name: user.name,
       role: user.role,
-      status: user.status,
-      userId: user._id.toString(),
-      photoURL: user.photoURL,
     };
 
     next();
@@ -80,14 +74,14 @@ const verifyToken = async (req, res, next) => {
     console.error("Token verification error:", error);
 
     if (error.code === "auth/id-token-expired") {
-      return res.status(401).json({
+      return res.status(401).send({
         success: false,
         error: "Token expired",
         code: "TOKEN_EXPIRED",
       });
     }
 
-    return res.status(401).json({
+    return res.status(401).send({
       success: false,
       error: "Invalid token",
       code: "INVALID_TOKEN",
@@ -125,7 +119,7 @@ const verifyRole = (allowedRoles) => {
 
 // MongoDB connection
 
-const uri = process.env.MONGO_URI_TEST;
+const uri = process.env.MONGO_URI;
 
 // Create MongoDB client
 
@@ -546,6 +540,347 @@ app.post("/api/users/google", async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Google login failed",
+    });
+  }
+});
+
+// ============= Profile APIs =============
+
+// GET current user profile (protected)
+app.get("/api/users/profile", verifyToken, async (req, res) => {
+  const email = req.query.email;
+  console.log("Email from query:", email); // user@example.com
+  console.log("All query params:", req.query);
+  try {
+    const user = await usersCollection.findOne(
+      { email: email },
+      {
+        projection: {
+          password: 0,
+          firebaseUID: 0,
+        },
+      },
+    );
+
+    if (!user) {
+      return res.status(404).send({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    res.send({
+      success: true,
+      data: user,
+    });
+  } catch (error) {
+    console.error("Error fetching profile:", error);
+    res.status(500).send({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// UPDATE user profile (protected)
+app.put("/api/users/profile", verifyToken, async (req, res) => {
+  try {
+    const email = req.query.email;
+    const decoded_email = req.decoded_user?.email;
+
+    // Verify email matches
+    if (email !== decoded_email) {
+      return res.status(401).send({
+        success: false,
+        error: "Forbidden access",
+        code: "UNAUTHORIZED_ACCESS",
+      });
+    }
+
+    const { name, phone, photoURL, location, bio, whatsapp } = req.body;
+
+    // Build update object based on user role
+    const updateData = {
+      name,
+      phone,
+      photoURL,
+      location,
+      bio,
+      whatsapp,
+      updatedAt: new Date(),
+    };
+
+    // Add role-specific fields
+    if (req.decoded_user.role === "tutor") {
+      const { qualifications, subjects, experience, hourlyRate, availability } =
+        req.body;
+
+      if (qualifications) updateData.qualifications = qualifications;
+      if (subjects) updateData.subjects = subjects;
+      if (experience) updateData.experience = experience;
+      if (hourlyRate) updateData.hourlyRate = hourlyRate;
+      if (availability) updateData.availability = availability;
+    } else if (req.decoded_user.role === "student") {
+      const { preferredSubjects, class: studentClass } = req.body;
+
+      if (preferredSubjects) updateData.preferredSubjects = preferredSubjects;
+      if (studentClass) updateData.class = studentClass;
+    }
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: updateData },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    // Get updated user data
+    const updatedUser = await usersCollection.findOne(
+      { email },
+      {
+        projection: {
+          password: 0,
+          firebaseUID: 0,
+        },
+      },
+    );
+
+    console.log(`✅ Profile updated for: ${email}`);
+    res.send({
+      success: true,
+      message: "Profile updated successfully",
+      data: updatedUser,
+    });
+  } catch (error) {
+    console.error("Error updating profile:", error);
+    res.status(500).send({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// GET user statistics based on role
+app.get("/api/users/stats", verifyToken, async (req, res) => {
+  try {
+    const stats = {};
+
+    if (req.decoded_user.role === "tutor") {
+      // Get tutor statistics
+      const [totalApplications, acceptedApplications, totalEarnings] =
+        await Promise.all([
+          applicationsCollection.countDocuments({
+            tutorId: req.decoded_user.uid,
+          }),
+          applicationsCollection.countDocuments({
+            tutorId: req.decoded_user.uid,
+            status: "accepted",
+          }),
+          paymentsCollection
+            .aggregate([
+              {
+                $match: {
+                  tutorId: req.decoded_user.uid,
+                  status: "completed",
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  total: { $sum: "$amount" },
+                },
+              },
+            ])
+            .toArray(),
+        ]);
+
+      stats.applications = totalApplications;
+      stats.acceptedApplications = acceptedApplications;
+      stats.totalEarnings = totalEarnings[0]?.total || 0;
+
+      // Get ongoing tuitions count
+      stats.ongoingTuitions = await tuitionsCollection.countDocuments({
+        tutorId: req.user.userId,
+        status: "ongoing",
+      });
+    } else if (req.decoded_user.role === "student") {
+      // Get student statistics
+      const [totalTuitions, activeTuitions, totalPayments] = await Promise.all([
+        tuitionsCollection.countDocuments({
+          studentId: req.decoded_user.uid,
+        }),
+        tuitionsCollection.countDocuments({
+          studentId: req.decoded_user.uid,
+          status: "ongoing",
+        }),
+        paymentsCollection
+          .aggregate([
+            {
+              $match: {
+                studentId: req.decoded_user.uid,
+                status: "completed",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$amount" },
+              },
+            },
+          ])
+          .toArray(),
+      ]);
+
+      stats.totalTuitions = totalTuitions;
+      stats.activeTuitions = activeTuitions;
+      stats.totalPayments = totalPayments[0]?.total || 0;
+
+      // Get applications count for student's tuitions
+      const studentTuitions = await tuitionsCollection
+        .find({ studentId: req.decoded_user.uid }, { projection: { _id: 1 } })
+        .toArray();
+
+      const tuitionIds = studentTuitions.map((t) => t._id);
+
+      stats.totalApplications = await applicationsCollection.countDocuments({
+        tuitionPostId: { $in: tuitionIds },
+      });
+    }
+
+    res.send({
+      success: true,
+      data: stats,
+    });
+  } catch (error) {
+    console.error("Error fetching stats:", error);
+    res.status(500).send({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// GET user activity (recent applications/posts)
+app.get("/api/users/activity", verifyToken, async (req, res) => {
+  try {
+    const { limit = 5, email } = req.query;
+    const decoded_email = req.decoded_user?.email;
+    if (!email === decoded_email) {
+      return res.status(401).send({
+        success: false,
+        error: "Forbidden access",
+        code: "UNAUTHORIZED_ACCESS",
+      });
+    }
+    const user = await usersCollection.findOne({ email });
+    console.log(limit, email, decoded_email);
+    let activity = [];
+
+    if (user.role === "tutor") {
+      // Get recent applications for tutor
+      activity = await applicationsCollection
+        .aggregate([
+          { $match: { tutorId: user._id } },
+          { $sort: { appliedAt: -1 } },
+          { $limit: parseInt(limit) },
+          {
+            $lookup: {
+              from: "tuitions",
+              localField: "tuitionPostId",
+              foreignField: "_id",
+              as: "tuition",
+            },
+          },
+          { $unwind: "$tuition" },
+          {
+            $project: {
+              _id: 1,
+              type: "application",
+              title: "$tuition.title",
+              subject: "$tuition.subject",
+              class: "$tuition.class",
+              status: 1,
+              date: "$appliedAt",
+              tuitionId: "$tuitionPostId",
+            },
+          },
+        ])
+        .toArray();
+    } else if (user.role === "student") {
+      // Get recent tuition posts for student
+      activity = await tuitionsCollection
+        .find(
+          { studentId: user._id },
+          {
+            projection: {
+              _id: 1,
+              type: "tuition",
+              title: 1,
+              subject: 1,
+              class: 1,
+              status: 1,
+              date: "$posted",
+            },
+          },
+        )
+        .sort({ posted: -1 })
+        .limit(parseInt(limit))
+        .toArray();
+    }
+
+    res.send({
+      success: true,
+      data: activity,
+    });
+  } catch (error) {
+    console.error("Error fetching activity:", error);
+    res.status(500).send({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// DELETE account (soft delete)
+app.delete("/api/users/profile", verifyToken, async (req, res) => {
+  try {
+    const { reason } = req.body;
+
+    // Soft delete - just mark as deleted
+    const result = await usersCollection.updateOne(
+      { email: req.user.email },
+      {
+        $set: {
+          status: "deleted",
+          deletedAt: new Date(),
+          deletionReason: reason || "User requested",
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    console.log(`✅ Account deleted for: ${req.user.email}`);
+    res.send({
+      success: true,
+      message: "Account deleted successfully",
+    });
+  } catch (error) {
+    console.error("Error deleting account:", error);
+    res.status(500).send({
+      success: false,
+      error: error.message,
     });
   }
 });
