@@ -116,7 +116,7 @@ export default verifyRole;
 
 // MongoDB connection
 
-const uri = process.env.MONGO_URI_TEST;
+const uri = process.env.MONGO_URI;
 
 // Create MongoDB client
 
@@ -513,6 +513,561 @@ app.post("/api/users/google", async (req, res) => {
     });
   }
 });
+
+// ============= Student Post APIs =============
+
+// POST - Create new tuition post (Student only)
+app.post(
+  "/api/tuitions",
+  verifyToken,
+  verifyRole(["student"]),
+  async (req, res) => {
+    try {
+      const email = req.query.email;
+      const decoded_email = req.decoded_user?.email;
+
+      // Verify email matches
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+
+      // Get student's MongoDB document
+      const student = await usersCollection.findOne({ email });
+      if (!student) {
+        return res.status(404).send({
+          success: false,
+          error: "Student not found",
+        });
+      }
+
+      const {
+        title,
+        institution,
+        location,
+        area,
+        type,
+        mode,
+        subject,
+        class: className,
+        minBudget,
+        maxBudget,
+        budgetType,
+        schedule,
+        requirements,
+        qualifications,
+        responsibilities,
+        benefits,
+        students,
+        gender,
+        experience,
+        education,
+        description,
+        badge,
+        badgeColor,
+        slots,
+        applicationDeadline,
+      } = req.body;
+
+      // Validate required fields
+      if (
+        !title ||
+        !subject ||
+        !className ||
+        !location ||
+        !minBudget ||
+        !maxBudget ||
+        !schedule?.days
+      ) {
+        return res.status(400).send({
+          success: false,
+          error: "Please fill in all required fields",
+        });
+      }
+
+      const newTuition = {
+        // Student info
+        studentId: student._id,
+        studentName: student.name,
+        studentEmail: email,
+
+        // Basic Info
+        title,
+        institution: institution || "",
+        location,
+        area: area || "",
+        type: type || "part-time",
+        mode: mode || "on-site",
+
+        // Subject & Class
+        subject,
+        class: className,
+
+        // Budget
+        minBudget: Number(minBudget),
+        maxBudget: Number(maxBudget),
+        budgetType: budgetType || "BDT",
+
+        // Schedule
+        schedule: {
+          days: schedule.days,
+          hours: schedule.hours || "",
+          flexible: schedule.flexible || false,
+          startDate: schedule.startDate ? new Date(schedule.startDate) : null,
+          duration: schedule.duration || "",
+        },
+
+        // Arrays
+        requirements: requirements || [],
+        qualifications: qualifications || [],
+        responsibilities: responsibilities || [],
+        benefits: benefits || [],
+
+        // Additional Info
+        students: students || "1",
+        gender: gender || "any",
+        experience: experience || "",
+        education: education || "",
+        description: description || "",
+
+        // Meta
+        badge: badge || "",
+        badgeColor: badgeColor || "secondary",
+        slots: Number(slots) || 1,
+        applicationDeadline: applicationDeadline
+          ? new Date(applicationDeadline)
+          : null,
+
+        // System fields
+        status: "pending", // Admin approval required
+        applicants: 0,
+        views: 0,
+        savedCount: 0,
+        posted: new Date(),
+        updatedAt: new Date(),
+      };
+
+      const result = await tuitionsCollection.insertOne(newTuition);
+
+      console.log(`✅ New tuition posted by: ${email}`);
+      res.status(201).send({
+        success: true,
+        message: "Tuition posted successfully and awaiting admin approval",
+        data: { ...newTuition, _id: result.insertedId },
+      });
+    } catch (error) {
+      console.error("Error posting tuition:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
+
+// GET - Get student's own tuition posts
+app.get(
+  "/api/students/my-tuitions",
+  verifyToken,
+  verifyRole(["student"]),
+  async (req, res) => {
+    try {
+      console.log("Full request query:", req.query);
+      console.log("Email from query:", req.query.email);
+      console.log("Decoded user email:", req.decoded_user?.email);
+      const email = req.query.email;
+      const decoded_email = req.decoded_user?.email;
+      console.log("Query email:", email);
+      console.log("Decoded email:", decoded_email);
+
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+
+      const student = await usersCollection.findOne({ email });
+      console.log("Student found:", student ? "Yes" : "No");
+      console.log("Student ID type:", typeof student?._id);
+      if (!student) {
+        return res.status(404).send({
+          success: false,
+          error: "Student not found",
+        });
+      }
+
+      const { status, page = 1, limit = 10 } = req.query;
+      const filter = { studentId: student._id };
+
+      if (status && status !== "all") {
+        filter.status = status;
+      }
+
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+
+      const tuitions = await tuitionsCollection
+        .find(filter)
+        .sort({ posted: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray();
+
+      const total = await tuitionsCollection.countDocuments(filter);
+
+      res.send({
+        success: true,
+        data: tuitions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching my tuitions:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
+
+// Single tuition for admin and student
+app.get(
+  "/api/tuitions/:id/student-view",
+  verifyToken,
+  verifyRole(["student", "admin"]),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          error: "Invalid tuition ID format",
+        });
+      }
+
+      const tuition = await tuitionsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!tuition) {
+        return res.status(404).send({
+          success: false,
+          error: "Tuition post not found",
+        });
+      }
+
+      const userEmail = req.decoded_user?.email;
+      const user = await usersCollection.findOne({ email: userEmail });
+      const userRole = user?.role;
+
+      // Admin hole - sob post dekhte parbe
+      if (userRole === "admin") {
+        return res.send({ success: true, data: tuition });
+      }
+
+      // Student hole
+      if (userRole === "student") {
+        // Case 1: Active post - sob student dekhte parbe
+        if (tuition.status === "active") {
+          return res.send({ success: true, data: tuition });
+        }
+
+        // Case 2: Inactive post - sudhu nijer ta dekhte parbe
+        if (tuition.studentId.toString() === user._id.toString()) {
+          return res.send({ success: true, data: tuition });
+        }
+
+        // Case 3: Onno student er inactive post - access nai
+        return res.status(403).send({
+          success: false,
+          error: "You don't have permission to view this post",
+        });
+      }
+
+      // Fallback
+      return res.status(403).send({
+        success: false,
+        error: "Forbidden access",
+      });
+    } catch (error) {
+      console.error("Error fetching tuition:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
+
+// GET single tuition by ID (for editing)
+// app.get("/api/tuitions/:id", verifyToken, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+
+//     if (!ObjectId.isValid(id)) {
+//       return res.status(400).send({
+//         success: false,
+//         error: "Invalid tuition ID format",
+//       });
+//     }
+
+//     const tuition = await tuitionsCollection.findOne({
+//       _id: new ObjectId(id),
+//     });
+
+//     if (!tuition) {
+//       return res.status(404).send({
+//         success: false,
+//         error: "Tuition post not found",
+//       });
+//     }
+
+//     res.send({
+//       success: true,
+//       data: tuition,
+//     });
+//   } catch (error) {
+//     console.error("Error fetching tuition:", error);
+//     res.status(500).send({
+//       success: false,
+//       error: error.message,
+//     });
+//   }
+// });
+
+// PUT - Update tuition post (Student only - own posts)
+app.put(
+  "/api/tuitions/:id",
+  verifyToken,
+  verifyRole(["student"]),
+  async (req, res) => {
+    try {
+      const email = req.query.email;
+      const decoded_email = req.decoded_user?.email;
+      const tuitionId = req.params.id;
+
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+
+      if (!ObjectId.isValid(tuitionId)) {
+        return res.status(400).send({
+          success: false,
+          error: "Invalid tuition ID",
+        });
+      }
+
+      // Verify this tuition belongs to the student
+      const student = await usersCollection.findOne({ email });
+      const existingTuition = await tuitionsCollection.findOne({
+        _id: new ObjectId(tuitionId),
+        studentId: student._id,
+      });
+
+      if (!existingTuition) {
+        return res.status(404).send({
+          success: false,
+          error: "Tuition not found or you don't have permission",
+        });
+      }
+
+      const {
+        title,
+        institution,
+        location,
+        area,
+        type,
+        mode,
+        subject,
+        class: className,
+        minBudget,
+        maxBudget,
+        budgetType,
+        schedule,
+        requirements,
+        qualifications,
+        responsibilities,
+        benefits,
+        students,
+        gender,
+        experience,
+        education,
+        description,
+        badge,
+        badgeColor,
+        slots,
+        applicationDeadline,
+        status,
+      } = req.body;
+
+      const updateData = {
+        title,
+        institution,
+        location,
+        area,
+        type,
+        mode,
+        subject,
+        class: className,
+        minBudget: Number(minBudget),
+        maxBudget: Number(maxBudget),
+        budgetType,
+        schedule: {
+          days: schedule?.days,
+          hours: schedule?.hours,
+          flexible: schedule?.flexible,
+          startDate: schedule?.startDate ? new Date(schedule.startDate) : null,
+          duration: schedule?.duration,
+        },
+        requirements: requirements || [],
+        qualifications: qualifications || [],
+        responsibilities: responsibilities || [],
+        benefits: benefits || [],
+        students,
+        gender,
+        experience,
+        education,
+        description,
+        badge,
+        badgeColor,
+        slots: Number(slots),
+        applicationDeadline: applicationDeadline
+          ? new Date(applicationDeadline)
+          : null,
+        status: status || existingTuition.status,
+        updatedAt: new Date(),
+      };
+
+      // Remove undefined fields
+      Object.keys(updateData).forEach(
+        (key) => updateData[key] === undefined && delete updateData[key],
+      );
+
+      const result = await tuitionsCollection.updateOne(
+        { _id: new ObjectId(tuitionId) },
+        { $set: updateData },
+      );
+
+      if (result.modifiedCount === 0 && result.matchedCount === 0) {
+        return res.status(400).send({
+          success: false,
+          error: "No changes made",
+        });
+      }
+
+      const updatedTuition = await tuitionsCollection.findOne({
+        _id: new ObjectId(tuitionId),
+      });
+
+      console.log(`✅ Tuition updated: ${tuitionId} by ${email}`);
+      res.send({
+        success: true,
+        message: "Tuition updated successfully",
+        data: updatedTuition,
+      });
+    } catch (error) {
+      console.error("Error updating tuition:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
+
+// DELETE - Delete tuition post (Student only - own posts)
+app.delete(
+  "/api/tuitions/:id",
+  verifyToken,
+  verifyRole(["student"]),
+  async (req, res) => {
+    try {
+      const email = req.query.email;
+      const decoded_email = req.decoded_user?.email;
+      const tuitionId = req.params.id;
+
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+
+      if (!ObjectId.isValid(tuitionId)) {
+        return res.status(400).send({
+          success: false,
+          error: "Invalid tuition ID",
+        });
+      }
+
+      // Verify this tuition belongs to the student
+      const student = await usersCollection.findOne({ email });
+      const tuition = await tuitionsCollection.findOne({
+        _id: new ObjectId(tuitionId),
+        studentId: student._id,
+      });
+
+      if (!tuition) {
+        return res.status(404).send({
+          success: false,
+          error: "Tuition not found or you don't have permission",
+        });
+      }
+
+      // Check if there are any applications
+      const applications = await applicationsCollection.countDocuments({
+        tuitionPostId: new ObjectId(tuitionId),
+      });
+
+      let result;
+      if (applications > 0) {
+        // Soft delete - just mark as deleted
+        result = await tuitionsCollection.updateOne(
+          { _id: new ObjectId(tuitionId) },
+          {
+            $set: {
+              status: "deleted",
+              deletedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+        );
+      } else {
+        // No applications, hard delete
+        result = await tuitionsCollection.deleteOne({
+          _id: new ObjectId(tuitionId),
+        });
+      }
+
+      console.log(`✅ Tuition deleted: ${tuitionId} by ${email}`);
+      res.send({
+        success: true,
+        message: "Tuition deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting tuition:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
 
 // ============= Profile APIs =============
 
