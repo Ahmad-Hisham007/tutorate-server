@@ -5,11 +5,10 @@ import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
 import admin from "firebase-admin";
 import Stripe from "stripe";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
 // Initialize Firebase Admin
 try {
   let privateKey = process.env.FIREBASE_PRIVATE_KEY;
-
-  // Remove quotes if present
   if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
     privateKey = privateKey.slice(1, -1);
   }
@@ -34,6 +33,28 @@ const port = process.env.PORT || 3000;
 // =========================================================
 app.use(cors());
 app.use(json());
+// Add this middleware before all routes
+async function ensureDBConnection(req, res, next) {
+  try {
+    await usersCollection.findOne({});
+    next();
+  } catch (error) {
+    console.log("🔄 Reconnecting to MongoDB...");
+    try {
+      cachedDb = null;
+      await connectToMongoDB();
+      next();
+    } catch (err) {
+      res.status(500).send({
+        success: false,
+        error: "Database connection failed",
+      });
+    }
+  }
+}
+
+// Apply to all API routes
+app.use("/api", ensureDBConnection);
 
 // TOKEN VERIFICATION MIDDLEWARE
 
@@ -125,8 +146,6 @@ const verifyRole = (allowedRoles) => {
 app.get("/favicon.ico", (req, res) => {
   res.status(204).end();
 });
-
-// Create MongoDB client
 const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
   family: 4,
@@ -140,7 +159,6 @@ const client = new MongoClient(uri, {
   serverSelectionTimeoutMS: 30000,
 });
 let cachedDb = null;
-// Connect to MongoDB
 async function connectToMongoDB() {
   if (cachedDb) {
     console.log("✅ Using cached MongoDB connection");
@@ -185,7 +203,7 @@ async function createIndexes() {
 }
 
 // Routes
-app.get("/", (req, res) => {
+app.get("/", ensureDBConnection, (req, res) => {
   res.send("Hello World!");
 });
 
@@ -194,7 +212,7 @@ app.get("/", (req, res) => {
 // =============================================
 
 // GET all tutors (public route)
-app.get("/api/tutors", async (req, res) => {
+app.get("/api/tutors", ensureDBConnection, async (req, res) => {
   try {
     const tutors = await usersCollection
       .find({
@@ -223,7 +241,7 @@ app.get("/api/tutors", async (req, res) => {
 });
 
 // GET single tutor by ID
-app.get("/api/tutors/:id", async (req, res) => {
+app.get("/api/tutors/:id", ensureDBConnection, async (req, res) => {
   try {
     const tutor = await usersCollection.findOne(
       {
@@ -263,7 +281,7 @@ app.get("/api/tutors/:id", async (req, res) => {
 // =============================================
 
 // GET all tuitions with search, filters and sorting
-app.get("/api/tuitions", async (req, res) => {
+app.get("/api/tuitions", ensureDBConnection, async (req, res) => {
   try {
     const {
       search,
@@ -342,7 +360,7 @@ app.get("/api/tuitions", async (req, res) => {
 });
 
 // GET single tuition by ID
-app.get("/api/tuitions/:id", async (req, res) => {
+app.get("/api/tuitions/:id", ensureDBConnection, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -383,7 +401,7 @@ app.get("/api/tuitions/:id", async (req, res) => {
 // =============================================
 
 // Register new user
-app.post("/api/users", async (req, res) => {
+app.post("/api/users", ensureDBConnection, async (req, res) => {
   try {
     const { name, email, phone, photoURL, role, uid } = req.body;
 
@@ -465,7 +483,7 @@ app.post("/api/users", async (req, res) => {
 });
 
 // Google Login - Create or Update user
-app.post("/api/users/google", async (req, res) => {
+app.post("/api/users/google", ensureDBConnection, async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -500,377 +518,403 @@ app.post("/api/users/google", async (req, res) => {
 // ============= Profile APIs =============
 
 // GET current user profile (protected)
-app.get("/api/users/profile", verifyToken, async (req, res) => {
-  const email = req.query.email;
-  const decoded_email = req.decoded_user?.email;
-
-  try {
-    // Verify email matches
-    if (email !== decoded_email) {
-      return res.status(401).send({
-        success: false,
-        error: "Forbidden access",
-        code: "UNAUTHORIZED_ACCESS",
-      });
-    }
-    const user = await usersCollection.findOne(
-      { email: email },
-      {
-        projection: {
-          password: 0,
-          firebaseUID: 0,
-        },
-      },
-    );
-
-    if (!user) {
-      return res.status(404).send({
-        success: false,
-        error: "User not found",
-      });
-    }
-
-    res.send({
-      success: true,
-      data: user,
-    });
-  } catch (error) {
-    console.error("Error fetching profile:", error);
-    res.status(500).send({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// UPDATE user profile (protected)
-app.put("/api/users/profile", verifyToken, async (req, res) => {
-  try {
+app.get(
+  "/api/users/profile",
+  ensureDBConnection,
+  verifyToken,
+  async (req, res) => {
     const email = req.query.email;
     const decoded_email = req.decoded_user?.email;
 
-    // Verify email matches
-    if (email !== decoded_email) {
-      return res.status(401).send({
-        success: false,
-        error: "Forbidden access",
-        code: "UNAUTHORIZED_ACCESS",
-      });
-    }
-
-    const { name, phone, photoURL, location, bio, whatsapp } = req.body;
-
-    // Build update object based on user role
-    const updateData = {
-      name,
-      phone,
-      photoURL,
-      location,
-      bio,
-      whatsapp,
-      updatedAt: new Date(),
-    };
-
-    // Add role-specific fields
-    if (req.decoded_user.role === "tutor") {
-      const {
-        qualifications,
-        subjects,
-        experience,
-        expectedSalary,
-        availability,
-      } = req.body;
-
-      if (qualifications) updateData.qualifications = qualifications;
-      if (subjects) updateData.subjects = subjects;
-      if (experience) updateData.experience = experience;
-      if (expectedSalary) updateData.expectedSalary = expectedSalary;
-      if (availability) updateData.availability = availability;
-    } else if (req.decoded_user.role === "student") {
-      const { preferredSubjects, class: studentClass } = req.body;
-
-      if (preferredSubjects) updateData.preferredSubjects = preferredSubjects;
-      if (studentClass) updateData.class = studentClass;
-    }
-
-    const result = await usersCollection.updateOne(
-      { email },
-      { $set: updateData },
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).send({
-        success: false,
-        error: "User not found",
-      });
-    }
-
-    // Get updated user data
-    const updatedUser = await usersCollection.findOne(
-      { email },
-      {
-        projection: {
-          password: 0,
-          firebaseUID: 0,
+    try {
+      // Verify email matches
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+      const user = await usersCollection.findOne(
+        { email: email },
+        {
+          projection: {
+            password: 0,
+            firebaseUID: 0,
+          },
         },
-      },
-    );
+      );
 
-    console.log(`✅ Profile updated for: ${email}`);
-    res.send({
-      success: true,
-      message: "Profile updated successfully",
-      data: updatedUser,
-    });
-  } catch (error) {
-    console.error("Error updating profile:", error);
-    res.status(500).send({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+      if (!user) {
+        return res.status(404).send({
+          success: false,
+          error: "User not found",
+        });
+      }
+
+      res.send({
+        success: true,
+        data: user,
+      });
+    } catch (error) {
+      console.error("Error fetching profile:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
+
+// UPDATE user profile (protected)
+app.put(
+  "/api/users/profile",
+  ensureDBConnection,
+  verifyToken,
+  async (req, res) => {
+    try {
+      const email = req.query.email;
+      const decoded_email = req.decoded_user?.email;
+
+      // Verify email matches
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+
+      const { name, phone, photoURL, location, bio, whatsapp } = req.body;
+
+      // Build update object based on user role
+      const updateData = {
+        name,
+        phone,
+        photoURL,
+        location,
+        bio,
+        whatsapp,
+        updatedAt: new Date(),
+      };
+
+      // Add role-specific fields
+      if (req.decoded_user.role === "tutor") {
+        const {
+          qualifications,
+          subjects,
+          experience,
+          expectedSalary,
+          availability,
+        } = req.body;
+
+        if (qualifications) updateData.qualifications = qualifications;
+        if (subjects) updateData.subjects = subjects;
+        if (experience) updateData.experience = experience;
+        if (expectedSalary) updateData.expectedSalary = expectedSalary;
+        if (availability) updateData.availability = availability;
+      } else if (req.decoded_user.role === "student") {
+        const { preferredSubjects, class: studentClass } = req.body;
+
+        if (preferredSubjects) updateData.preferredSubjects = preferredSubjects;
+        if (studentClass) updateData.class = studentClass;
+      }
+
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: updateData },
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          error: "User not found",
+        });
+      }
+
+      // Get updated user data
+      const updatedUser = await usersCollection.findOne(
+        { email },
+        {
+          projection: {
+            password: 0,
+            firebaseUID: 0,
+          },
+        },
+      );
+
+      console.log(`✅ Profile updated for: ${email}`);
+      res.send({
+        success: true,
+        message: "Profile updated successfully",
+        data: updatedUser,
+      });
+    } catch (error) {
+      console.error("Error updating profile:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
 
 // GET user statistics based on role
-app.get("/api/users/stats", verifyToken, async (req, res) => {
-  try {
-    const email = req.query.email; // 👈 Add email from query
-    const decoded_email = req.decoded_user?.email;
+app.get(
+  "/api/users/stats",
+  ensureDBConnection,
+  verifyToken,
+  async (req, res) => {
+    try {
+      const email = req.query.email; // 👈 Add email from query
+      const decoded_email = req.decoded_user?.email;
 
-    if (email !== decoded_email) {
-      return res.status(401).send({
-        success: false,
-        error: "Forbidden access",
-        code: "UNAUTHORIZED_ACCESS",
-      });
-    }
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
 
-    // Get user from MongoDB using email
-    const user = await usersCollection.findOne({ email });
+      // Get user from MongoDB using email
+      const user = await usersCollection.findOne({ email });
 
-    if (!user) {
-      return res.status(404).send({
-        success: false,
-        error: "User not found",
-      });
-    }
+      if (!user) {
+        return res.status(404).send({
+          success: false,
+          error: "User not found",
+        });
+      }
 
-    const stats = {};
+      const stats = {};
 
-    if (user.role === "tutor") {
-      // Get tutor statistics using MongoDB _id
-      const [totalApplications, acceptedApplications, totalEarnings] =
-        await Promise.all([
-          applicationsCollection.countDocuments({
-            tutorId: user._id, // 👈 Use user._id not uid
-          }),
-          applicationsCollection.countDocuments({
-            tutorId: user._id,
-            status: "approved", // 👈 "approved" not "accepted"
-          }),
-          paymentsCollection
-            .aggregate([
-              {
-                $match: {
-                  tutorId: user._id,
-                  status: "completed",
+      if (user.role === "tutor") {
+        // Get tutor statistics using MongoDB _id
+        const [totalApplications, acceptedApplications, totalEarnings] =
+          await Promise.all([
+            applicationsCollection.countDocuments({
+              tutorId: user._id, // 👈 Use user._id not uid
+            }),
+            applicationsCollection.countDocuments({
+              tutorId: user._id,
+              status: "approved", // 👈 "approved" not "accepted"
+            }),
+            paymentsCollection
+              .aggregate([
+                {
+                  $match: {
+                    tutorId: user._id,
+                    status: "completed",
+                  },
                 },
-              },
-              {
-                $group: {
-                  _id: null,
-                  total: { $sum: "$amount" },
+                {
+                  $group: {
+                    _id: null,
+                    total: { $sum: "$amount" },
+                  },
                 },
-              },
-            ])
-            .toArray(),
-        ]);
+              ])
+              .toArray(),
+          ]);
 
-      stats.applications = totalApplications;
-      stats.acceptedApplications = acceptedApplications;
-      stats.totalEarnings = totalEarnings[0]?.total || 0;
+        stats.applications = totalApplications;
+        stats.acceptedApplications = acceptedApplications;
+        stats.totalEarnings = totalEarnings[0]?.total || 0;
 
-      // Get ongoing tuitions count
-      stats.ongoingTuitions = await tuitionsCollection.countDocuments({
-        tutorId: user._id,
-        status: "ongoing",
-      });
-    } else if (user.role === "student") {
-      // Get student statistics using MongoDB _id
-      const [totalTuitions, activeTuitions, totalPayments] = await Promise.all([
-        tuitionsCollection.countDocuments({
-          studentId: user._id, // 👈 Use user._id
-        }),
-        tuitionsCollection.countDocuments({
-          studentId: user._id,
+        // Get ongoing tuitions count
+        stats.ongoingTuitions = await tuitionsCollection.countDocuments({
+          tutorId: user._id,
           status: "ongoing",
-        }),
-        paymentsCollection
+        });
+      } else if (user.role === "student") {
+        // Get student statistics using MongoDB _id
+        const [totalTuitions, activeTuitions, totalPayments] =
+          await Promise.all([
+            tuitionsCollection.countDocuments({
+              studentId: user._id, // 👈 Use user._id
+            }),
+            tuitionsCollection.countDocuments({
+              studentId: user._id,
+              status: "ongoing",
+            }),
+            paymentsCollection
+              .aggregate([
+                {
+                  $match: {
+                    studentId: user._id,
+                    status: "completed",
+                  },
+                },
+                {
+                  $group: {
+                    _id: null,
+                    total: { $sum: "$amount" },
+                  },
+                },
+              ])
+              .toArray(),
+          ]);
+
+        stats.totalTuitions = totalTuitions;
+        stats.activeTuitions = activeTuitions;
+        stats.totalPayments = totalPayments[0]?.total || 0;
+
+        // Get applications count for student's tuitions
+        const studentTuitions = await tuitionsCollection
+          .find({ studentId: user._id }, { projection: { _id: 1 } })
+          .toArray();
+
+        const tuitionIds = studentTuitions.map((t) => t._id);
+
+        stats.totalApplications = await applicationsCollection.countDocuments({
+          tuitionPostId: { $in: tuitionIds },
+        });
+      }
+
+      res.send({
+        success: true,
+        data: stats,
+      });
+    } catch (error) {
+      console.error("Error fetching stats:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
+
+// GET user activity (recent applications/posts)
+app.get(
+  "/api/users/activity",
+  ensureDBConnection,
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { limit = 5, email } = req.query;
+      const decoded_email = req.decoded_user?.email;
+      if (!email === decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+      const user = await usersCollection.findOne({ email });
+      console.log(limit, email, decoded_email);
+      let activity = [];
+
+      if (user.role === "tutor") {
+        // Get recent applications for tutor
+        activity = await applicationsCollection
           .aggregate([
+            { $match: { tutorId: user._id } },
+            { $sort: { appliedAt: -1 } },
+            { $limit: parseInt(limit) },
             {
-              $match: {
-                studentId: user._id,
-                status: "completed",
+              $lookup: {
+                from: "tuitions",
+                localField: "tuitionPostId",
+                foreignField: "_id",
+                as: "tuition",
               },
             },
+            { $unwind: "$tuition" },
             {
-              $group: {
-                _id: null,
-                total: { $sum: "$amount" },
+              $project: {
+                _id: 1,
+                type: "application",
+                title: "$tuition.title",
+                subject: "$tuition.subject",
+                class: "$tuition.class",
+                status: 1,
+                date: "$appliedAt",
+                tuitionId: "$tuitionPostId",
               },
             },
           ])
-          .toArray(),
-      ]);
+          .toArray();
+      } else if (user.role === "student") {
+        // Get recent tuition posts for student
+        activity = await tuitionsCollection
+          .find(
+            { studentId: user._id },
+            {
+              projection: {
+                _id: 1,
+                type: "tuition",
+                title: 1,
+                subject: 1,
+                class: 1,
+                status: 1,
+                date: "$posted",
+              },
+            },
+          )
+          .sort({ posted: -1 })
+          .limit(parseInt(limit))
+          .toArray();
+      }
 
-      stats.totalTuitions = totalTuitions;
-      stats.activeTuitions = activeTuitions;
-      stats.totalPayments = totalPayments[0]?.total || 0;
-
-      // Get applications count for student's tuitions
-      const studentTuitions = await tuitionsCollection
-        .find({ studentId: user._id }, { projection: { _id: 1 } })
-        .toArray();
-
-      const tuitionIds = studentTuitions.map((t) => t._id);
-
-      stats.totalApplications = await applicationsCollection.countDocuments({
-        tuitionPostId: { $in: tuitionIds },
+      res.send({
+        success: true,
+        data: activity,
       });
-    }
-
-    res.send({
-      success: true,
-      data: stats,
-    });
-  } catch (error) {
-    console.error("Error fetching stats:", error);
-    res.status(500).send({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// GET user activity (recent applications/posts)
-app.get("/api/users/activity", verifyToken, async (req, res) => {
-  try {
-    const { limit = 5, email } = req.query;
-    const decoded_email = req.decoded_user?.email;
-    if (!email === decoded_email) {
-      return res.status(401).send({
+    } catch (error) {
+      console.error("Error fetching activity:", error);
+      res.status(500).send({
         success: false,
-        error: "Forbidden access",
-        code: "UNAUTHORIZED_ACCESS",
+        error: error.message,
       });
     }
-    const user = await usersCollection.findOne({ email });
-    console.log(limit, email, decoded_email);
-    let activity = [];
-
-    if (user.role === "tutor") {
-      // Get recent applications for tutor
-      activity = await applicationsCollection
-        .aggregate([
-          { $match: { tutorId: user._id } },
-          { $sort: { appliedAt: -1 } },
-          { $limit: parseInt(limit) },
-          {
-            $lookup: {
-              from: "tuitions",
-              localField: "tuitionPostId",
-              foreignField: "_id",
-              as: "tuition",
-            },
-          },
-          { $unwind: "$tuition" },
-          {
-            $project: {
-              _id: 1,
-              type: "application",
-              title: "$tuition.title",
-              subject: "$tuition.subject",
-              class: "$tuition.class",
-              status: 1,
-              date: "$appliedAt",
-              tuitionId: "$tuitionPostId",
-            },
-          },
-        ])
-        .toArray();
-    } else if (user.role === "student") {
-      // Get recent tuition posts for student
-      activity = await tuitionsCollection
-        .find(
-          { studentId: user._id },
-          {
-            projection: {
-              _id: 1,
-              type: "tuition",
-              title: 1,
-              subject: 1,
-              class: 1,
-              status: 1,
-              date: "$posted",
-            },
-          },
-        )
-        .sort({ posted: -1 })
-        .limit(parseInt(limit))
-        .toArray();
-    }
-
-    res.send({
-      success: true,
-      data: activity,
-    });
-  } catch (error) {
-    console.error("Error fetching activity:", error);
-    res.status(500).send({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  },
+);
 
 // DELETE account (soft delete)
-app.delete("/api/users/profile", verifyToken, async (req, res) => {
-  try {
-    const { reason } = req.body;
+app.delete(
+  "/api/users/profile",
+  ensureDBConnection,
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { reason } = req.body;
 
-    // Soft delete - just mark as deleted
-    const result = await usersCollection.updateOne(
-      { email: req.user.email },
-      {
-        $set: {
-          status: "deleted",
-          deletedAt: new Date(),
-          deletionReason: reason || "User requested",
-          updatedAt: new Date(),
+      // Soft delete - just mark as deleted
+      const result = await usersCollection.updateOne(
+        { email: req.user.email },
+        {
+          $set: {
+            status: "deleted",
+            deletedAt: new Date(),
+            deletionReason: reason || "User requested",
+            updatedAt: new Date(),
+          },
         },
-      },
-    );
+      );
 
-    if (result.matchedCount === 0) {
-      return res.status(404).send({
+      if (result.matchedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          error: "User not found",
+        });
+      }
+
+      console.log(`✅ Account deleted for: ${req.user.email}`);
+      res.send({
+        success: true,
+        message: "Account deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting account:", error);
+      res.status(500).send({
         success: false,
-        error: "User not found",
+        error: error.message,
       });
     }
-
-    console.log(`✅ Account deleted for: ${req.user.email}`);
-    res.send({
-      success: true,
-      message: "Account deleted successfully",
-    });
-  } catch (error) {
-    console.error("Error deleting account:", error);
-    res.status(500).send({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  },
+);
 
 // ============= Student Post APIs =============
 // =============================================
@@ -879,6 +923,7 @@ app.delete("/api/users/profile", verifyToken, async (req, res) => {
 // POST - Create new tuition post (Student only)
 app.post(
   "/api/tuitions",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -1031,6 +1076,7 @@ app.post(
 // GET - Get student's own tuition posts
 app.get(
   "/api/students/my-tuitions",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -1102,6 +1148,7 @@ app.get(
 // Single tuition for admin and student
 app.get(
   "/api/tuitions/:id/student-view",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student", "admin"]),
   async (req, res) => {
@@ -1172,6 +1219,7 @@ app.get(
 // PUT - Update tuition post (Student only - own posts)
 app.put(
   "/api/tuitions/:id",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -1316,6 +1364,7 @@ app.put(
 // DELETE - Delete tuition post (Student only - own posts)
 app.delete(
   "/api/tuitions/:id",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -1404,6 +1453,7 @@ app.delete(
 // GET - Get all applications for a specific tuition (Student only)
 app.get(
   "/api/student/tuitions/:tuitionId/applications",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -1457,7 +1507,8 @@ app.get(
 
 // PATCH - Approve/Reject application
 app.patch(
-  "/api/applications/:applicationId/:action", // action = "approve" or "reject"
+  "/api/applications/:applicationId/:action",
+  ensureDBConnection, // action = "approve" or "reject"
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -1551,6 +1602,7 @@ app.patch(
 // POST - Apply to a tuition (Tutor only)
 app.post(
   "/api/applications",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["tutor"]),
   async (req, res) => {
@@ -1667,6 +1719,7 @@ app.post(
 // GET - Get my applications (Tutor only)
 app.get(
   "/api/applications/my-applications",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["tutor"]),
   async (req, res) => {
@@ -1764,6 +1817,7 @@ app.get(
 // PUT - Update application (Tutor only - only when pending)
 app.put(
   "/api/applications/:id",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["tutor"]),
   async (req, res) => {
@@ -1848,6 +1902,7 @@ app.put(
 // DELETE - Delete application (Tutor only - only when pending)
 app.delete(
   "/api/applications/:id",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["tutor"]),
   async (req, res) => {
@@ -1923,6 +1978,7 @@ app.delete(
 // GET - Tutor's ongoing tuitions
 app.get(
   "/api/tutor/tuitions/ongoing",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["tutor"]),
   async (req, res) => {
@@ -2002,6 +2058,7 @@ app.get(
 // GET - Revenue history (Tutor only)
 app.get(
   "/api/payments/revenue-history",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["tutor"]),
   async (req, res) => {
@@ -2089,6 +2146,7 @@ app.get(
 // GET all users (Admin only)
 app.get(
   "/api/admin/users",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2151,6 +2209,7 @@ app.get(
 // PATCH - Update user role (Admin only)
 app.patch(
   "/api/admin/users/:userId/role",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2215,6 +2274,7 @@ app.patch(
 // PATCH - Update user status (Admin only)
 app.patch(
   "/api/admin/users/:userId/status",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2279,6 +2339,7 @@ app.patch(
 // DELETE - Delete user (Admin only)
 app.delete(
   "/api/admin/users/:userId",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2347,6 +2408,7 @@ app.delete(
 // GET all tuitions for admin (with filters)
 app.get(
   "/api/admin/tuitions",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2407,6 +2469,7 @@ app.get(
 // PATCH - Approve tuition
 app.patch(
   "/api/admin/tuitions/:tuitionId/approve",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2456,6 +2519,7 @@ app.patch(
 // PATCH - Reject tuition
 app.patch(
   "/api/admin/tuitions/:tuitionId/reject",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2505,6 +2569,7 @@ app.patch(
 // GET - Reports data
 app.get(
   "/api/admin/reports",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["admin"]),
   async (req, res) => {
@@ -2669,6 +2734,7 @@ app.get(
 // POST - Create payment intent
 app.post(
   "/api/create-payment-intent",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -2739,6 +2805,7 @@ app.post(
 // POST - Payment success (webhook or manual)
 app.post(
   "/api/payment/success",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]),
   async (req, res) => {
@@ -2830,6 +2897,7 @@ app.post(
 // GET - Payment history (Student only - ei API change korte hobe)
 app.get(
   "/api/payments/history",
+  ensureDBConnection,
   verifyToken,
   verifyRole(["student"]), // 👈 Add this
   async (req, res) => {
