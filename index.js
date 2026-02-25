@@ -38,6 +38,7 @@ app.use(json());
 // TOKEN VERIFICATION MIDDLEWARE
 
 // Verify Firebase token middleware
+
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) {
@@ -98,8 +99,6 @@ const verifyToken = async (req, res, next) => {
     });
   }
 };
-
-// middlewares/verifyRole.js
 const verifyRole = (allowedRoles) => {
   return (req, res, next) => {
     // Check if user exists (verifyToken already ran)
@@ -122,16 +121,13 @@ const verifyRole = (allowedRoles) => {
   };
 };
 
-export default verifyRole;
-
 // MongoDB connection
 app.get("/favicon.ico", (req, res) => {
-  res.status(204).end(); // No content response
+  res.status(204).end();
 });
-const uri = process.env.MONGO_URI;
 
 // Create MongoDB client
-
+const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
   family: 4,
   serverApi: {
@@ -143,16 +139,24 @@ const client = new MongoClient(uri, {
   socketTimeoutMS: 45000,
   serverSelectionTimeoutMS: 30000,
 });
-
+let cachedDb = null;
 // Connect to MongoDB
 async function connectToMongoDB() {
+  if (cachedDb) {
+    console.log("✅ Using cached MongoDB connection");
+    return cachedDb;
+  }
+
   try {
     console.log("Connecting to MongoDB...");
     await client.connect();
     await client.db("admin").command({ ping: 1 });
     console.log("✅ Successfully connected to MongoDB!");
+    cachedDb = client.db("tutorate");
+    return cachedDb;
   } catch (error) {
     console.error("❌ MongoDB connection error:", error.message);
+    throw error;
   }
 }
 
@@ -2900,22 +2904,9 @@ app.get(
 // -----------------Fixing DBs manually-----------------
 app.listen(port, async () => {
   console.log(`🚀 Server listening on port ${port}`);
-  console.log(`📍 Health check: http://localhost:${port}/health`);
 
   try {
-    // Connect to MongoDB first
     await connectToMongoDB();
-
-    // Then create indexes
-    await createIndexes();
-
-    // // Then insert sample data (only if collection is empty)
-    // await insertTutors();
-
-    // await updateTuitions();
-
-    // await updateBudgets();
-
     console.log("✅ Server setup complete!");
   } catch (error) {
     console.error("❌ Server setup error:", error.message);
