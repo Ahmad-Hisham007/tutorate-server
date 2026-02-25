@@ -27,6 +27,7 @@ const port = process.env.PORT || 3000;
 // =========================================================
 app.use(cors());
 app.use(json());
+
 // TOKEN VERIFICATION MIDDLEWARE
 
 // Verify Firebase token middleware
@@ -117,7 +118,9 @@ const verifyRole = (allowedRoles) => {
 export default verifyRole;
 
 // MongoDB connection
-
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end(); // No content response
+});
 const uri = process.env.MONGO_URI;
 
 // Create MongoDB client
