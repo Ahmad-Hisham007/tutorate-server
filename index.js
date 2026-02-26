@@ -725,7 +725,7 @@ app.get(
         // Get ongoing tuitions count
         stats.ongoingTuitions = await tuitionsCollection.countDocuments({
           tutorId: user._id,
-          status: "ongoing",
+          status: "completed",
         });
       } else if (user.role === "student") {
         // Get student statistics using MongoDB _id
@@ -736,7 +736,7 @@ app.get(
             }),
             tuitionsCollection.countDocuments({
               studentId: user._id,
-              status: "ongoing",
+              status: "completed",
             }),
             paymentsCollection
               .aggregate([
@@ -2018,7 +2018,7 @@ app.get(
 
       const total = await tuitionsCollection.countDocuments({
         tutorId: tutor._id,
-        status: "ongoing",
+        status: "completed",
       });
 
       // Get student details for each tuition
