@@ -2139,6 +2139,79 @@ app.get(
   },
 );
 
+// GET single tuition for assigned tutor (Tutor only)
+app.get(
+  "/api/tuitions/:id/tutor-view",
+  ensureDBConnection,
+  verifyToken,
+  verifyRole(["tutor"]),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const email = req.query.email;
+      const decoded_email = req.decoded_user?.email;
+
+      if (email !== decoded_email) {
+        return res.status(401).send({
+          success: false,
+          error: "Forbidden access",
+          code: "UNAUTHORIZED_ACCESS",
+        });
+      }
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          success: false,
+          error: "Invalid tuition ID format",
+        });
+      }
+
+      // Get the tutor
+      const tutor = await usersCollection.findOne({ email });
+      if (!tutor) {
+        return res.status(404).send({
+          success: false,
+          error: "Tutor not found",
+        });
+      }
+
+      // Find the tuition
+      const tuition = await tuitionsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!tuition) {
+        return res.status(404).send({
+          success: false,
+          error: "Tuition post not found",
+        });
+      }
+
+      // Check if this tutor is the assigned tutor
+      if (
+        !tuition.tutorId ||
+        tuition.tutorId.toString() !== tutor._id.toString()
+      ) {
+        return res.status(403).send({
+          success: false,
+          error: "You don't have permission to view this tuition",
+        });
+      }
+
+      // Return the tuition (any status - active, completed, etc.)
+      res.send({
+        success: true,
+        data: tuition,
+      });
+    } catch (error) {
+      console.error("Error fetching tuition for tutor:", error);
+      res.status(500).send({
+        success: false,
+        error: error.message,
+      });
+    }
+  },
+);
 // ============= Admin - User Management APIs =============
 // =================================================================
 // =================================================================
