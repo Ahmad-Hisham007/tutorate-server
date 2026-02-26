@@ -1627,7 +1627,15 @@ app.post(
           error: "Tutor not found",
         });
       }
-
+      // Get tutor's MongoDB document and check status
+      if (tutor.status !== "active") {
+        return res.status(403).send({
+          success: false,
+          error:
+            "Your account is not active yet. Please wait for admin approval.",
+          code: "ACCOUNT_INACTIVE",
+        });
+      }
       const { tuitionId, qualifications, experience, expectedSalary } =
         req.body;
 
@@ -1649,7 +1657,7 @@ app.post(
 
       const tuition = await tuitionsCollection.findOne({
         _id: new ObjectId(tuitionId),
-        status: "active", // Only active tuitions can be applied to
+        status: "active",
       });
 
       if (!tuition) {
